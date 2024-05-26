@@ -1,70 +1,112 @@
 from games.hlpoker.player import HLPokerPlayer
-from games.hlpoker.action import HLPokerAction
 from games.hlpoker.round import Round
 from games.hlpoker.state import HLPokerState
+from games.hlpoker.action import HLPokerAction
 from games.state import State
-import random
+from random import choice
+import pickle
+import os
 
-class ExpectimaxHLPokerPlayer(HLPokerPlayer):
+class CBReasonHLPokerPlayer(HLPokerPlayer):
     def __init__(self, name):
         super().__init__(name)
+        self.case_base = []
+        self.load_cases()
+
+    def load_cases(self):
+        if os.path.exists('case_base.pkl'):
+            with open('case_base.pkl', 'rb') as file:
+                self.case_base = pickle.load(file)
+
+    def save_cases(self):
+        with open('case_base.pkl', 'wb') as file:
+            pickle.dump(self.case_base, file)
 
     def get_action_with_cards(self, state: HLPokerState, private_cards, board_cards):
-        actions = state.get_possible_actions()
-        best_action = None
-        max_value = float('-inf')
+        # Recuperar o caso mais similar
+        similar_case = self.retrieve(state, private_cards, board_cards)
 
-        # Avalia cada ação possível usando o Expectimax
-        for action in actions:
-            value = self.expectimax(state, action, private_cards, board_cards, depth=2)  # Definindo profundidade de pesquisa
-            if value > max_value:
-                max_value = value
-                best_action = action
+        if similar_case:
+            action = self.adapt_action(similar_case, state)
+            if state.validate_action(action):
+                return action
 
-        return best_action
+        # Se nenhum caso similar encontrado ou ação inválida, escolher aleatoriamente
+        return choice(state.get_possible_actions())
 
-    def expectimax(self, state, action, private_cards, board_cards, depth):
-        if depth == 0 or state.is_finished():
-            return self.evaluate(state, private_cards, board_cards)
+    def retrieve(self, state: HLPokerState, private_cards, board_cards):
+        # Implementação de recuperação usando uma métrica de similaridade
+        best_case = None
+        highest_similarity = -1
+        for case in self.case_base:
+            similarity = self.calculate_similarity(case, state, private_cards, board_cards)
+            if similarity > highest_similarity:
+                highest_similarity = similarity
+                best_case = case
+        return best_case
 
-        # Simula o efeito da ação
-        simulated_state = state.clone()
-        simulated_state.update(action)
+    def calculate_similarity(self, case, state: HLPokerState, private_cards, board_cards):
+        # Calcular similaridade com base nas cartas privadas e comunitárias, rodada, sequência de ações e força da mão
+        similarity = 0
+        if case['round'] == state.get_current_round():
+            similarity += 1
+        similarity += len(set(case['private_cards']) & set(private_cards))
+        similarity += len(set(case['board_cards']) & set(board_cards))
+        similarity += self.sequence_similarity(case['sequence'], state.get_sequence())
+        similarity += self.hand_strength_similarity(case['private_cards'], private_cards)
+        return similarity
 
-        if state.get_acting_player() == 0:  # Supõe-se que o índice 0 seja este bot
-            max_value = float('-inf')
-            for next_action in simulated_state.get_possible_actions():
-                value = self.expectimax(simulated_state, next_action, private_cards, board_cards, depth - 1)
-                max_value = max(max_value, value)
-            return max_value
-        else:
-            # Supõe-se um ambiente de adversário
-            values = []
-            for next_action in simulated_state.get_possible_actions():
-                value = self.expectimax(simulated_state, next_action, private_cards, board_cards, depth - 1)
-                values.append(value)
-            return sum(values) / len(values) if values else 0
+    def sequence_similarity(self, seq1, seq2):
+        # Similaridade baseada na sequência de ações
+        matches = 0
+        length = min(len(seq1), len(seq2))
+        for i in range(length):
+            if seq1[i] == seq2[i]:
+                matches += 1
+        return matches / max(len(seq1), len(seq2), 1)
 
-    def evaluate(self, state, private_cards, board_cards):
-        if state.is_finished():
-            if state.get_result(0) > 0:  # Supondo que 0 é o índice do bot
-                return float('inf')  # Ganhou o jogo
-            elif state.get_result(0) < 0:
-                return float('-inf')  # Perdeu o jogo
+    def hand_strength_similarity(self, hand1, hand2):
+        # Similaridade baseada na força da mão
+        strength1 = self.hand_strength(hand1)
+        strength2 = self.hand_strength(hand2)
+        return 1 - abs(strength1 - strength2)
 
-        hand_strength = 0
-        # Garantir que há cartas suficientes para avaliação
-        if len(private_cards + board_cards) >= 5:
-            hand_strength = self.calculate_hand_strength(private_cards, board_cards)
+    def hand_strength(self, cards):
+        # Calcular a força da mão usando uma heurística simples
+        if not cards:
+            return 0
+        return sum(card.rank for card in cards) / len(cards)
 
-        # Calcular pot odds
-        pot_odds = self.calculate_pot_odds(state)
+    def adapt_action(self, case, state: HLPokerState):
+        # Adaptar a ação do caso similar encontrado
+        action = case['action']
+        if state.get_current_round() != case['round']:
+            # Exemplo de adaptação: ajustar a ação se a rodada atual for diferente
+            if action == HLPokerAction.RAISE and state.get_current_round() == Round.Preflop:
+                return HLPokerAction.CALL
+        return action
 
-        # Considerar a agressividade dos oponentes e as apostas feitas
-        opponent_aggression = self.estimate_opponent_aggression(state)
+    def retain(self, state: HLPokerState, action, private_cards, board_cards):
+        # Verificar se o caso já existe na base de casos
+        for case in self.case_base:
+            if (case['round'] == state.get_current_round() and
+                case['private_cards'] == private_cards and
+                case['board_cards'] == board_cards and
+                case['sequence'] == state.get_sequence() and
+                case['action'] == action):
+                return  # Não armazenar casos duplicados
 
-        # Avaliação simplificada como uma combinação ponderada desses fatores
-        return hand_strength * 0.5 + pot_odds * 0.3 + opponent_aggression * 0.2
+        # Armazenar o novo caso na base de casos
+        case = {
+            'round': state.get_current_round(),
+            'private_cards': private_cards,
+            'board_cards': board_cards,
+            'sequence': state.get_sequence(),
+            'action': action,
+            'result': state.get_result(self.name)
+        }
+        self.case_base.append(case)
+        self.save_cases()
 
     def event_my_action(self, action, new_state):
         pass
